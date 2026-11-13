@@ -12,6 +12,11 @@ const emit = defineEmits<{
   (event: 'create'): void
 }>()
 
+// 分批排期参数（与建计划入参同名，默认值与后端 PlanCreateIn 对齐）
+const capacityGb = defineModel<number>('capacityGb', { default: 4000 })
+const startMonth = defineModel<number>('startMonth', { default: new Date().getMonth() + 1 })
+const monthOptions = Array.from({ length: 12 }, (_, index) => index + 1)
+
 const selectedHits = computed(() =>
   props.trial.hits.filter((hit) => props.selected.includes(hit.table_id)),
 )
@@ -19,6 +24,9 @@ const selectedSize = computed(() => selectedHits.value.reduce((sum, hit) => sum 
 const selectedSave = computed(() => selectedHits.value.reduce((sum, hit) => sum + hit.save_month, 0))
 const selectedBlock = computed(
   () => selectedHits.value.filter((hit) => hit.risk === 'block').length,
+)
+const overCapacity = computed(
+  () => selectedHits.value.filter((hit) => hit.size_gb > Number(capacityGb.value)).length,
 )
 const canCreate = computed(() => props.selected.length > 0 && !props.busy)
 </script>
@@ -98,10 +106,36 @@ const canCreate = computed(() => props.selected.length > 0 && !props.busy)
       </table>
     </div>
 
-    <footer class="foot mono">
-      已选 {{ selected.length }} 张 · {{ gb(selectedSize) }} · 预估月省 ¥{{ money(selectedSave) }}
-      <span v-if="selectedBlock" class="warn">其中 {{ selectedBlock }} 张会被风险闸门阻断</span>
-      <span v-else class="ok">风险预检全部通过</span>
+    <footer class="foot">
+      <div class="foot-line mono">
+        已选 {{ selected.length }} 张 · {{ gb(selectedSize) }} · 预估月省 ¥{{ money(selectedSave) }}
+        <span v-if="selectedBlock" class="warn">其中 {{ selectedBlock }} 张会被风险闸门阻断</span>
+        <span v-else class="ok">风险预检全部通过</span>
+      </div>
+      <div class="schedule-line">
+        <label class="sch-field">
+          <span class="sch-label mono">月度搬迁容量</span>
+          <input
+            v-model.number="capacityGb"
+            type="number"
+            min="1"
+            step="100"
+            class="sch-input mono"
+            aria-label="月度搬迁容量（GB）"
+          />
+          <span class="sch-unit mono">GB / 月</span>
+        </label>
+        <label class="sch-field">
+          <span class="sch-label mono">开工月份</span>
+          <select v-model.number="startMonth" class="sch-input mono" aria-label="开工月份">
+            <option v-for="month in monthOptions" :key="month" :value="month">{{ month }} 月</option>
+          </select>
+        </label>
+        <p v-if="overCapacity" class="sch-warn mono">
+          ⚠ {{ overCapacity }} 张表单表体积超过月度容量，建计划后会单列「排不下」且不计收益
+        </p>
+        <p v-else class="sch-hint mono">按每 GB 首年净收益从高到低装箱，单表不可拆分，每月一批</p>
+      </div>
     </footer>
   </section>
 </template>
@@ -207,6 +241,55 @@ tbody tr.blocked {
   display: flex;
   gap: 14px;
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+}
+.foot-line {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.schedule-line {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.sch-field {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.sch-label {
+  font-size: 10px;
+  color: var(--slate-faint);
+  white-space: nowrap;
+}
+.sch-input {
+  width: 96px;
+  padding: 4px 7px;
+  border: 1px solid var(--line-strong);
+  background: var(--frost-0);
+  color: var(--slate);
+  font-size: 11.5px;
+}
+select.sch-input {
+  width: 78px;
+}
+.sch-unit {
+  font-size: 9.5px;
+  color: var(--slate-faint);
+}
+.sch-warn {
+  color: var(--block);
+  font-size: 10px;
+  margin: 0;
+}
+.sch-hint {
+  color: var(--slate-faint);
+  font-size: 10px;
+  margin: 0;
 }
 .warn {
   color: var(--block);

@@ -60,15 +60,29 @@ export const usePlanStore = defineStore('plan', {
         this.busy = false
       }
     },
-    async create(title: string, threshold: number, tableIds: string[]) {
+    async create(
+      title: string,
+      threshold: number,
+      tableIds: string[],
+      capacityGb: number,
+      startMonth: number,
+    ) {
       this.busy = true
       this.error = ''
       this.notice = ''
       try {
-        const plan = await createPlan({ title, threshold, table_ids: tableIds })
+        const plan = await createPlan({
+          title,
+          threshold,
+          monthly_capacity_gb: capacityGb,
+          start_month: startMonth,
+          table_ids: tableIds,
+        })
         this.current = plan
         this.list = [plan, ...this.list]
-        this.notice = `已创建 ${plan.code}，共 ${plan.item_count} 项，等待风险复检`
+        this.notice =
+          `已创建 ${plan.code}：排入 ${plan.scheduled_count} 张 / ${plan.batch_count} 批` +
+          (plan.unscheduled_count ? `，${plan.unscheduled_count} 张超月度容量排不下（不计收益）` : '')
         return plan
       } catch (error) {
         this.error = (error as { message?: string }).message ?? '建计划失败'
@@ -125,7 +139,10 @@ export const usePlanStore = defineStore('plan', {
       try {
         this.current = await submitPlan(this.current.id)
         const plan = this.current
-        this.notice = `已提交 ${plan.item_count} 张，净年省 ¥${plan.net_save_year.toLocaleString('zh-CN')}`
+        this.notice =
+          `已提交 ${plan.scheduled_count} 张 / ${plan.batch_count} 批，当年净省 ¥` +
+          `${plan.current_year_net_save.toLocaleString('zh-CN')}` +
+          (plan.unscheduled_count ? `；${plan.unscheduled_count} 张排不下未开工单` : '')
         this.syncList()
       } catch (error) {
         this.error = (error as { message?: string }).message ?? '提交失败'

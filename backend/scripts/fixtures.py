@@ -210,6 +210,9 @@ SEED_PLAN_CODE = "MP-2026Q4-001"
 SEED_PLAN_TITLE = "2026-Q4 冷存降本计划（草稿）"
 SEED_PLAN_EXTRA_TABLES = ["ads.store_ranking_weekly", "ads.member_growth_dashboard"]
 SEED_PLAN_NOTE = "季度巡检基线：12 张热区表 + 2 张人工加塞，待复检后提交"
+# 分批排期：每月搬迁窗口 4,000 GB，11 月开工（单表 4,800 GB 的交易明细主表将排不下）
+SEED_PLAN_CAPACITY_GB = 4000.0
+SEED_PLAN_START_MONTH = 11
 
 # 主流程验收脚本使用的 8 张表（试算结果按预估月省倒序，前 8 行即这 8 张）
 PRIMARY_FLOW_SELECTION = [

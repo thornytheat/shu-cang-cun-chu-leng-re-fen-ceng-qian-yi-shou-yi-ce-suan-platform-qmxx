@@ -50,8 +50,9 @@ class PlanItemStatus(str):
     PENDING = "pending"
     REMOVED = "removed"
     SUBMITTED = "submitted"
+    UNSCHEDULED = "unscheduled"
 
-    ALL = (PENDING, REMOVED, SUBMITTED)
+    ALL = (PENDING, REMOVED, SUBMITTED, UNSCHEDULED)
 
 
 class Compression(str):

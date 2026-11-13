@@ -12,7 +12,7 @@
 | 上游 | 表元数据（大小 / 分区 / 压缩 / 最近写入）+ 按天聚合的查询日志（本仓库 seed 生成 3,600 行日访问） |
 | 本系统替代 | 「凭印象挑表 + Excel 估省」→「热度口径统一 + 净收益测算 + 风险闸门 + 工单导出」 |
 | 下游 | 季度存储预算评审（财务）、迁移工单（平台组执行）、报表 owner 的确认回执 |
-| 一天的工作剧本 | 09:10 陈可欣（admin）在「策略与试算」确认本季单价 热 1.05 / 温 0.85 / 冷 0.55 ¥/GB·月；09:35 林哲（analyst）把阈值调到 20 试算，命中 12 张，预估月省 ¥6,840；10:05 勾选前 8 张建计划 `MP-2026Q4-00x`；10:20 风险复检，`ads.monthly_finance_report_base`、`dws.store_daily_gmv` 近 7 天仍被访问 → 阻断；10:32 逐张移除阻断项；10:40 提交 6 张，净年省 ¥51,300、平均回收期 1.8 月；10:45 导出工单 CSV 交平台组排期；11:00 赵敏（viewer）在只读视图核对收益与风险。 |
+| 一天的工作剧本 | 09:10 陈可欣（admin）在「策略与试算」确认本季单价 热 1.05 / 温 0.85 / 冷 0.55 ¥/GB·月；09:35 林哲（analyst）把阈值调到 20 试算，命中 12 张，预估月省 ¥6,840；10:05 勾选前 8 张建计划 `MP-2026Q4-00x`，录入月度搬迁容量 4,000 GB、11 月开工；10:20 风险复检，`ads.monthly_finance_report_base`、`dws.store_daily_gmv` 近 7 天仍被访问 → 阻断；10:32 逐张移除阻断项；10:40 按每 GB 首年净收益分批提交，超容量的表单列「排不下」不计收益，计划页给出各批体积/成本/开工月/当年净省；10:45 导出带批次与开工月的工单 CSV 交平台组排期；11:00 赵敏（viewer）在只读视图核对收益与风险。 |
 
 ## 2. 角色与权限（后端 RBAC 真实返回 403）
 
@@ -30,7 +30,7 @@
 2. **存储概览**（`/overview`）：三档货架（体积 / 单价 / 月成本）、分层 × 温区体积树图（squarified，自绘 SVG）、42 张表货架清单（温区/分层/搜索/排序）、候选温度计、最热表与最大降冷机会、审计尾行。
 3. **表热度详情**（`/tables/:id`）：90 天访问序列 + 衰减权重图（自绘 SVG）、温度计、风险闸门逐项结论、收益测算、表元数据、同层邻表。
 4. **策略与试算**（`/policies`）：阈值滑杆 + 试算（命中数 / 月省 / 年省 / 净年省 / 回收期）、逐表勾选、以选中项建计划；admin 可编辑三档单价与冷区前置条件（保存即升版 v+1，旧版归档）。
-5. **迁移计划**（`/plans`）：计划台账（左）+ 计划工位（右）：风险复检 → 移除阻断项 → 提交 → 导出工单 CSV；admin 额外可见审计台账。
+5. **迁移计划**（`/plans`）：建计划录入月度搬迁容量与开工月，按容量上限分批排期（单表不可拆分）；计划台账（左）+ 计划工位（右）：分批卡（各批体积/成本/开工月/当年净省）→ 风险复检 → 移除阻断项 → 提交 → 导出带批次与开工月的工单 CSV；超容量「排不下」的表单列且不计收益；admin 额外可见审计台账。
 
 实体贯穿：`TableProfile` / `AccessStat` / `TierPolicy` / `MigrationPlan`（含子聚合 `MigrationPlanItem`）
 表 → `backend/src/models/*` → `schemas/*` → `services/*` → `controllers/*` + `routes/*` → 前端 `api/*` → `stores/*` → `pages` + `components/domain/*`。
@@ -66,6 +66,23 @@ net_save_year = save_month × 12 − migration_cost            # 首年净省
 复现条件：seed 固定 42 张表与 3,600 行日访问（确定性哈希抖动），阈值 20 时结果恒为
 `命中 12 张 / 月省 6840 / 年省 82080`；勾选前 8 张并移除 2 张阻断项后
 `6 张 / 净年省 51300 / 平均回收期 1.8 月 / 工单 CSV 6 行`。
+
+**算法 3 容量分批排期**（`backend/src/services/scheduling_core.py`）
+
+```
+输入         计划项 + 月度搬迁容量 capacity_gb + 开工年月（start_year/start_month）
+排序键       每 GB 首年净收益 net_save_year / size_gb 降序；同值时回收期 payback_months 短者优先（None 垫底）
+装箱         first-fit，单表不可拆分：当前批剩余容量装不下就开下一批，每批体积 ≤ capacity_gb
+排不下       单表体积 > capacity_gb → 任何批次都装不下，标记 unscheduled，单列且不计收益/不出工单
+排期         批次 b（0 起）开工月 = start_month + b（每月一批，跨年自动进位）
+当年净省     每张表迁完次月起计节省：current_year_net_save = save_month × (12 − b) − migration_cost
+             开工月 12（b≥12）当年节省为 0，一次性迁移成本仍全额计入，可为负
+计划汇总     金额/体积只统计已排期表；计划头同时保留满年口径 net_save_year 与折算口径 current_year_net_save
+```
+
+复现条件：seed 草稿计划 14 项、月度容量 4,000 GB、11 月开工时结果恒为
+`排上 13 张 / 排不下 1 张（dwd.trade_order_detail 4,800 GB 超容量）/ 3 批 / 当年净省 42090`，
+批次开工月依次为 `2026-11 / 2026-12 / 2027-01`，工单 CSV 只含已排期的 13 行且带「批次/开工月/当年净省」三列。
 
 ## 5. 快速启动
 
@@ -127,14 +144,14 @@ gb-582/
 ├── .env / .env.example
 ├── backend/
 │   ├── Dockerfile  entrypoint.sh  requirements.txt  alembic.ini
-│   ├── migrations/             # env.py + versions/0001_initial.py
+│   ├── migrations/             # env.py + versions/0001_initial.py + 0002_schedule.py（分批排期字段）
 │   ├── scripts/                # bootstrap_db.py / fixtures.py / seed_demo.py
 │   └── src/
 │       ├── config/             # settings / database / celery_app / app(create_app)
 │       ├── constants/          # enums(共享枚举) / roles / error_codes / limits / log_templates
 │       ├── models/             # table_profile / access_stat / tier_policy / migration_plan(+item) / audit_log / user
 │       ├── schemas/            # common / auth / table / policy / plan / overview
-│       ├── services/           # heat_service(算法1) / cost_service(算法2) / trial / plan / policy / table / overview / export / audit / auth
+│       ├── services/           # heat_service(算法1) / cost_service(算法2) / scheduling_core(算法3 容量分批) / trial / plan / policy / table / overview / export / audit / auth
 │       ├── controllers/        # health / auth / overview / table / policy / plan / audit
 │       ├── routes/             # 统一 /api 前缀
 │       ├── middlewares/        # auth(JWT) / rbac(403) / rate_limit(Redis) / audit_logger / error_handler
@@ -168,6 +185,7 @@ gb-582/
 | `JWT_SECRET` | 见 `.env.example` | JWT 签名密钥（生产必改） |
 | `REDIS_URL` | `redis://redis:6379/0` | Celery broker / backend、限流、心跳 |
 | `SEED_DEMO` | `true` | 首启自动 seed（幂等） |
+| `PLAN_MONTHLY_CAPACITY_GB` | `4000` | 建计划默认月度搬迁容量（GB/月），可按计划覆盖 |
 | `RATE_LIMIT_TRIAL_PER_MINUTE` | `20` | 试算限流 |
 | `RATE_LIMIT_PLAN_PER_MINUTE` | `14` | 建计划/复检/提交/导出限流 |
 

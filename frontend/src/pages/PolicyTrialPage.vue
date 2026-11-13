@@ -23,6 +23,8 @@ const router = useRouter()
 
 const localError = ref('')
 const creating = ref(false)
+const capacityGb = ref(4000)
+const startMonth = ref(new Date().getMonth() + 1)
 
 const canTrial = computed(() => auth.can('trial:run'))
 const canWritePolicy = computed(() => auth.can('policies:write'))
@@ -47,7 +49,7 @@ async function createPlanFromSelection() {
   }
   creating.value = true
   const title = `2026-Q4 降冷计划（试算 ${policy.threshold} 分 · ${policy.selected.length} 张）`
-  const plan = await plans.create(title, policy.threshold, policy.selected)
+  const plan = await plans.create(title, policy.threshold, policy.selected, capacityGb.value, startMonth.value)
   creating.value = false
   if (plan) {
     await router.push('/plans')
@@ -181,6 +183,8 @@ onMounted(load)
 
     <TrialBoard
       v-if="policy.trial"
+      v-model:capacity-gb="capacityGb"
+      v-model:start-month="startMonth"
       :trial="policy.trial"
       :selected="policy.selected"
       :busy="creating || !canPlan"

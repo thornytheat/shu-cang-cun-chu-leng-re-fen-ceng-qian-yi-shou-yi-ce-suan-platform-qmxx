@@ -8,7 +8,7 @@
   42 表（热 12 / 温 18 / 冷 12，合计 43,008 GB = 42.0 TB）
   3,600 行日访问统计（39 表 × 90 天 + 2 表 × 40 天 + 1 表 × 10 天）
   3 档策略（version=3，含冷区前置条件与迁移成本）
-  1 份 14 项草稿计划 + 3 个账号
+  1 份 14 项草稿计划（月容量 4,000 GB / 11 月开工：13 张排入 3 批，1 张超容量排不下）+ 3 个账号
 重复执行只打印 SEED_SKIPPED，末尾 SEED_SUMMARY 行逐字一致，供幂等校验。
 """
 from __future__ import annotations
@@ -210,6 +210,8 @@ def seed_plan(db) -> None:
     payload = SimpleNamespace(
         title=fixtures.SEED_PLAN_TITLE,
         threshold=20.0,
+        monthly_capacity_gb=fixtures.SEED_PLAN_CAPACITY_GB,
+        start_month=fixtures.SEED_PLAN_START_MONTH,
         table_ids=[name_to_id[name] for name in table_ids if name in name_to_id],
         note=fixtures.SEED_PLAN_NOTE,
     )

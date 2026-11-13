@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     rate_limit_plan_per_minute: int = 14
     rate_limit_default_per_minute: int = 240
 
+    # 分批排期：每月搬迁容量上限（GB），建计划时可按计划覆盖
+    plan_monthly_capacity_gb: float = 4000.0
+
     # 热度算法参数（与 README「算法口径」一致；前端只展示后端回传值）
     heat_window_days: int = 90
     heat_half_life_days: float = 14.0

@@ -2,6 +2,17 @@ export type StorageTier = 'hot' | 'warm' | 'cold'
 export type DwLayer = 'ods' | 'dwd' | 'dws' | 'ads'
 export type RiskLevel = 'block' | 'warn' | 'ok'
 export type PlanStatus = 'draft' | 'submitted' | 'approved' | 'cancelled'
+export type PlanScheduleStatus = 'scheduled' | 'unscheduled'
+
+export interface PlanBatch {
+  batch_no: number
+  start_month: string | null
+  table_count: number
+  size_gb: number
+  save_month: number
+  migration_cost: number
+  current_year_net_save: number
+}
 
 export interface TableRow {
   id: string
@@ -230,6 +241,12 @@ export interface PlanItem {
   risk: RiskLevel
   reasons: string
   status: string
+  schedule_status: PlanScheduleStatus
+  batch_no: number | null
+  start_offset: number | null
+  start_month: string | null
+  current_year_net_save: number
+  net_per_gb: number
 }
 
 export interface Plan {
@@ -240,14 +257,22 @@ export interface Plan {
   status_label: string
   policy_version: number
   threshold: number
+  monthly_capacity_gb: number
+  start_year: number
+  start_month: number
   total_size_gb: number
   save_month: number
   save_year: number
   migration_cost: number
   net_save_year: number
+  current_year_net_save: number
   avg_payback: number | null
   risk_block_count: number
   risk_warn_count: number
+  scheduled_count: number
+  unscheduled_count: number
+  batch_count: number
+  batches: PlanBatch[]
   created_by: string
   submitted_by: string
   submitted_at: string | null

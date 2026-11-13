@@ -1,12 +1,16 @@
-"""聚合口径纯函数层（试算 / 计划汇总 / 候选排序 / 阈值校验）。
+"""聚合口径纯函数层（试算 / 计划满年汇总 / 候选排序 / 阈值校验）。
 
-试算与计划提交共用同一套汇总口径（batch-plan §5.6）：
+试算与计划提交共用同一套**满年**汇总口径（batch-plan §5.6）：
 
   save_month     = Σ 逐表月省
   save_year      = save_month × 12
   migration_cost = Σ（size × 迁移单价 + 每表固定工单成本）
   net_save_year  = Σ 逐表首年净省 = save_year - migration_cost
   avg_payback    = migration_cost / save_month（总量加权，1.8 月即此口径）
+
+注意：本模块描述「假如迁了、按全年算」的经济性，不含容量/开工月约束。
+容量受限的分批排期与「当年净省」折算在 scheduling_core.py，plan_service 的计划头
+金额只汇总已排入批次的表，避免把排不下的表也计入账面收益。
 
 只吃 dict 或带同名属性的对象，不 import Session，可被 pytest 直接单测。
 """

@@ -1,10 +1,13 @@
-"""迁移计划：建计划 → 风险复检 → 移除阻断 → 提交 → 导出。
+"""迁移计划：建计划 → 风险复检 → 容量分批排期 → 移除阻断 → 提交 → 导出。
 
-计划汇总口径与 TrialResultOut 一致：
-  save_month = Σ 逐表月省；save_year = save_month × 12
-  migration_cost = Σ (size × 迁移单价 + 每表固定工单成本)
-  net_save_year = save_year - migration_cost
-  avg_payback = migration_cost / save_month（加权，1.8 月即此口径）
+收益口径分两层，避免「选中即按全年算」导致的账面虚高：
+
+1. 试算口径（savings_core.aggregate，计划项上的 save_month / net_save_year 等字段）
+   描述每张表「假如迁了」的首年经济性，与试算页完全一致，不随排期变化。
+2. 排期口径（scheduling_core.schedule_batches）
+   按计划记录的月度容量上限与开工月份分批：单表不可拆分，按每 GB 首年净收益
+   从高到低、同值时回收期短者优先装箱；装不下的表标记 unscheduled，单列且不计收益。
+   每张表迁完后次月开始产生节省，计划头与批次上的「当年净省」按开工月折算。
 """
 from __future__ import annotations
 
@@ -28,9 +31,10 @@ from src.models.migration_plan import MigrationPlan
 from src.models.migration_plan_item import MigrationPlanItem
 from src.models.table_profile import TableProfile
 from src.models.user import User
-from src.services import audit_service, cost_service, heat_service, savings_core
+from src.services import audit_service, cost_service, heat_service, savings_core, scheduling_core
 from src.utils.errors import AppError, not_found
 from src.utils.ids import parse_uuid
+from src.utils.numeric import money
 
 
 def _now() -> datetime:
@@ -53,6 +57,7 @@ def _next_code(db: Session, moment: datetime) -> str:
 
 
 def active_items(db: Session, plan_id) -> list[MigrationPlanItem]:
+    """计划内未移除的表（含排不下的 unscheduled 表，它们仍是计划的一部分）。"""
     return list(
         db.execute(
             select(MigrationPlanItem)
@@ -65,30 +70,121 @@ def active_items(db: Session, plan_id) -> list[MigrationPlanItem]:
     )
 
 
+def scheduled_items(db: Session, plan_id) -> list[MigrationPlanItem]:
+    """已排入批次的计划项，按批次号 + 批次内装箱顺序（每 GB 净收益降序）输出。
+
+    排序在 Python 侧完成，与 scheduling_core 的装箱键完全一致，
+    不依赖各数据库 UUID 生成顺序，保证页面与工单 CSV 逐行对齐。
+    """
+    rows = list(
+        db.execute(
+            select(MigrationPlanItem).where(
+                MigrationPlanItem.plan_id == plan_id,
+                MigrationPlanItem.status != PlanItemStatus.REMOVED,
+                MigrationPlanItem.schedule_status == scheduling_core.SCHEDULED,
+            )
+        ).scalars().all()
+    )
+    rows.sort(key=lambda item: (item.batch_no, scheduling_core.schedule_sort_key(item)))
+    return rows
+
+
+def apply_schedule(db: Session, plan: MigrationPlan, items: list[MigrationPlanItem]) -> dict:
+    """按计划头的容量/开工月重算每张表的批次与开工月，并写回计划项。"""
+    result = scheduling_core.schedule_batches(
+        items,
+        float(plan.monthly_capacity_gb),
+        int(plan.start_year),
+        int(plan.start_month),
+    )
+    by_id = {item.id: item for item in items}
+    for row in result["scheduled"] + result["unscheduled"]:
+        item = by_id.get(row["ref"].id) if hasattr(row["ref"], "id") else None
+        if item is None:  # 纯函数层回传的是 ORM 对象本身
+            item = row["ref"]
+        item.schedule_status = row["schedule_status"]
+        item.batch_no = row["batch_no"]
+        item.start_offset = row["start_offset"]
+        item.start_month = row["start_month"]
+        item.current_year_net_save = row["current_year_net_save"]
+    return result
+
+
 def recount(db: Session, plan: MigrationPlan) -> dict:
-    """把计划项汇总写回计划头（口径见 savings_core.aggregate，与试算共用）。"""
+    """汇总写回计划头。
+
+    风险计数覆盖全部未移除表（含排不下的）；金额/体积只统计已排入批次的表，
+    排不下的表不计任何收益与成本。
+    """
     items = active_items(db, plan.id)
-    summary = savings_core.aggregate(items)
+    scheduled = [item for item in items if item.schedule_status == scheduling_core.SCHEDULED]
+    summary = savings_core.aggregate(scheduled)
+
     plan.total_size_gb = summary["size_total_gb"]
     plan.save_month = summary["save_month"]
     plan.save_year = summary["save_year"]
     plan.migration_cost = summary["migration_cost"]
     plan.net_save_year = summary["net_save_year"]
     plan.avg_payback = summary["avg_payback"]
-    plan.risk_block_count = summary["risk_block_count"]
-    plan.risk_warn_count = summary["risk_warn_count"]
+    plan.risk_block_count = sum(1 for item in items if item.risk == "block")
+    plan.risk_warn_count = sum(1 for item in items if item.risk == "warn")
     db.flush()
     return {
-        "item_count": summary["count"],
+        "item_count": len(items),
+        "scheduled_count": len(scheduled),
+        "unscheduled_count": len(items) - len(scheduled),
+        "batch_count": len({item.batch_no for item in scheduled}),
         "total_size_gb": plan.total_size_gb,
         "save_month": plan.save_month,
         "save_year": plan.save_year,
         "migration_cost": plan.migration_cost,
         "net_save_year": plan.net_save_year,
+        "current_year_net_save": money(
+            sum(float(item.current_year_net_save) for item in scheduled)
+        ),
         "avg_payback": float(plan.avg_payback) if plan.avg_payback is not None else None,
         "risk_block_count": plan.risk_block_count,
         "risk_warn_count": plan.risk_warn_count,
     }
+
+
+def batch_view(db: Session, plan: MigrationPlan) -> list[dict]:
+    """计划页批次卡：每批体积、成本、开工月、当年净省（与工单 CSV 同源）。"""
+    rows = scheduled_items(db, plan.id)
+    batches: dict[int, dict] = {}
+    for item in rows:
+        batch = batches.setdefault(
+            item.batch_no,
+            {
+                "batch_no": item.batch_no,
+                "start_month": item.start_month,
+                "table_count": 0,
+                "size_gb": 0.0,
+                "migration_cost": 0.0,
+                "save_month": 0.0,
+                "current_year_net_save": 0.0,
+            },
+        )
+        batch["table_count"] += 1
+        batch["size_gb"] += float(item.size_gb)
+        batch["migration_cost"] += float(item.migration_cost)
+        batch["save_month"] += float(item.save_month)
+        batch["current_year_net_save"] += float(item.current_year_net_save)
+    view = []
+    for batch_no in sorted(batches):
+        batch = batches[batch_no]
+        view.append(
+            {
+                "batch_no": batch_no,
+                "start_month": batch["start_month"],
+                "table_count": batch["table_count"],
+                "size_gb": money(batch["size_gb"]),
+                "migration_cost": money(batch["migration_cost"]),
+                "save_month": money(batch["save_month"]),
+                "current_year_net_save": money(batch["current_year_net_save"]),
+            }
+        )
+    return view
 
 
 def serialize_item(item: MigrationPlanItem) -> dict:
@@ -107,11 +203,19 @@ def serialize_item(item: MigrationPlanItem) -> dict:
         "risk": item.risk,
         "reasons": item.reasons,
         "status": item.status,
+        "schedule_status": item.schedule_status,
+        "batch_no": item.batch_no,
+        "start_offset": item.start_offset,
+        "start_month": item.start_month,
+        "current_year_net_save": float(item.current_year_net_save),
+        "net_per_gb": scheduling_core.net_per_gb(item),
     }
 
 
 def serialize_plan(db: Session, plan: MigrationPlan, with_items: bool = True) -> dict:
     items = active_items(db, plan.id)
+    scheduled = [item for item in items if item.schedule_status == scheduling_core.SCHEDULED]
+    batches = batch_view(db, plan)
     payload = {
         "id": str(plan.id),
         "code": plan.code,
@@ -120,14 +224,24 @@ def serialize_plan(db: Session, plan: MigrationPlan, with_items: bool = True) ->
         "status_label": PLAN_STATUS_LABELS.get(plan.status, plan.status),
         "policy_version": int(plan.policy_version),
         "threshold": float(plan.threshold),
+        "monthly_capacity_gb": float(plan.monthly_capacity_gb),
+        "start_year": int(plan.start_year),
+        "start_month": int(plan.start_month),
         "total_size_gb": float(plan.total_size_gb),
         "save_month": float(plan.save_month),
         "save_year": float(plan.save_year),
         "migration_cost": float(plan.migration_cost),
         "net_save_year": float(plan.net_save_year),
+        "current_year_net_save": money(
+            sum(float(item.current_year_net_save) for item in scheduled)
+        ),
         "avg_payback": float(plan.avg_payback) if plan.avg_payback is not None else None,
         "risk_block_count": int(plan.risk_block_count),
         "risk_warn_count": int(plan.risk_warn_count),
+        "scheduled_count": len(scheduled),
+        "unscheduled_count": len(items) - len(scheduled),
+        "batch_count": len(batches),
+        "batches": batches,
         "created_by": plan.created_by,
         "submitted_by": plan.submitted_by,
         "submitted_at": plan.submitted_at.isoformat() if plan.submitted_at else None,
@@ -176,7 +290,22 @@ def build_item(db: Session, plan: MigrationPlan, profile: TableProfile, hot, gro
         risk=verdict.risk,
         reasons=verdict.reasons,
         status=PlanItemStatus.PENDING,
+        schedule_status=PlanItemStatus.UNSCHEDULED,
     )
+
+
+def _parse_schedule_inputs(payload) -> tuple[float, int]:
+    try:
+        capacity = scheduling_core.validate_capacity_gb(
+            getattr(payload, "monthly_capacity_gb", None)
+        )
+    except ValueError as exc:
+        raise AppError(codes.PLAN_CAPACITY_INVALID, str(exc), f"value={getattr(payload, 'monthly_capacity_gb', None)}") from None
+    try:
+        start_month = scheduling_core.validate_start_month(getattr(payload, "start_month", None))
+    except ValueError as exc:
+        raise AppError(codes.PLAN_START_MONTH_INVALID, str(exc), f"value={getattr(payload, 'start_month', None)}") from None
+    return capacity, start_month
 
 
 def create_plan(
@@ -194,6 +323,7 @@ def create_plan(
         raise AppError(
             codes.VALIDATION_ERROR, f"单次最多 {MAX_PLAN_ITEMS} 张表", f"count={len(table_ids)}"
         ) from None
+    capacity, start_month = _parse_schedule_inputs(payload)
     now = _now()
     plan = MigrationPlan(
         code=code or _next_code(db, now),
@@ -201,6 +331,9 @@ def create_plan(
         status=PlanStatus.DRAFT,
         policy_version=group.version,
         threshold=payload.threshold,
+        monthly_capacity_gb=capacity,
+        start_year=now.year,
+        start_month=start_month,
         created_by=actor.email if actor else "system",
         note=payload.note,
     )
@@ -222,6 +355,7 @@ def create_plan(
         db.add(build_item(db, plan, profile, hot, group))
         added += 1
     db.flush()
+    apply_schedule(db, plan, active_items(db, plan.id))
     summary = recount(db, plan)
     if actor is not None:
         audit_service.record(
@@ -230,7 +364,13 @@ def create_plan(
             actor=actor,
             entity_type="MigrationPlan",
             entity_id=plan.code,
-            detail={"items": added, "threshold": float(payload.threshold), **summary},
+            detail={
+                "items": added,
+                "threshold": float(payload.threshold),
+                "monthly_capacity_gb": capacity,
+                "start_month": start_month,
+                **summary,
+            },
             trace_id=trace_id,
         )
     return serialize_plan(db, plan)
@@ -259,6 +399,7 @@ def add_items(db: Session, group, plan_id: str, table_ids: list[str], actor: Use
         existing.add(table_key)
         added += 1
     db.flush()
+    apply_schedule(db, plan, active_items(db, plan.id))
     summary = recount(db, plan)
     audit_service.record(
         db,
@@ -282,6 +423,7 @@ def remove_item(db: Session, plan_id: str, item_id: str, actor: User, trace_id: 
         raise not_found("MigrationPlanItem", item_id)
     item.status = PlanItemStatus.REMOVED
     db.flush()
+    apply_schedule(db, plan, active_items(db, plan.id))
     summary = recount(db, plan)
     audit_service.record(
         db,
@@ -296,7 +438,7 @@ def remove_item(db: Session, plan_id: str, item_id: str, actor: User, trace_id: 
 
 
 def recheck(db: Session, group, plan_id: str, actor: User, trace_id: str = "") -> dict:
-    """风险复检：按最新访问数据重算每张表的风险与收益，同步刷新汇总。"""
+    """风险复检：按最新访问数据重算每张表的风险与收益，再按容量重新排期、刷新汇总。"""
     plan = _plan_or_404(db, plan_id)
     scores = heat_service.compute_scores(db, group)
     for item in active_items(db, plan.id):
@@ -317,6 +459,7 @@ def recheck(db: Session, group, plan_id: str, actor: User, trace_id: str = "") -
         item.reasons = verdict.reasons
     plan.rechecked_at = _now()
     db.flush()
+    apply_schedule(db, plan, active_items(db, plan.id))
     summary = recount(db, plan)
     audit_service.record(
         db,
@@ -337,7 +480,10 @@ def submit(db: Session, plan_id: str, actor: User, trace_id: str = "") -> dict:
     items = active_items(db, plan.id)
     if not items:
         raise AppError(codes.PLAN_EMPTY, "计划中没有可提交的表", f"plan={plan.code}")
-    blockers = savings_core.blockers(items)
+    # 排不下的表不计收益也不进工单，不构成提交阻断；阻断闸门只看能排上批次的表
+    blockers = savings_core.blockers(
+        [item for item in items if item.schedule_status == scheduling_core.SCHEDULED]
+    )
     if blockers:
         raise AppError(
             codes.PLAN_HAS_BLOCKERS,
@@ -345,9 +491,20 @@ def submit(db: Session, plan_id: str, actor: User, trace_id: str = "") -> dict:
             ",".join(blockers),
             extra={"blockers": blockers},
         )
+    scheduled = scheduled_items(db, plan.id)
+    if not scheduled:
+        raise AppError(
+            codes.PLAN_EMPTY,
+            "月度容量装不下任何表，调大容量或移除超大表后再提交",
+            f"plan={plan.code}",
+        )
     now = _now()
     for item in items:
-        item.status = PlanItemStatus.SUBMITTED
+        if item.schedule_status == scheduling_core.SCHEDULED:
+            item.status = PlanItemStatus.SUBMITTED
+        else:
+            # 排不下的表保留待处理状态，随计划留档但不生成工单
+            item.status = PlanItemStatus.UNSCHEDULED
     plan.status = PlanStatus.SUBMITTED
     plan.submitted_at = now
     plan.submitted_by = actor.email
@@ -393,7 +550,8 @@ def summary_of(db: Session, plan_id: str) -> dict:
 
 
 def plan_item_rows(db: Session, plan: MigrationPlan) -> list[MigrationPlanItem]:
-    return active_items(db, plan.id)
+    """工单导出口径：只含已排入批次的表，按批次号、批次内顺序输出。"""
+    return scheduled_items(db, plan.id)
 
 
 def stats(db: Session) -> dict:

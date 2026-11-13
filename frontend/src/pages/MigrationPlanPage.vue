@@ -7,7 +7,7 @@ import { usePlanStore } from '../stores/planStore'
 import type { AuditEntry } from '../types/domain'
 import { PLAN_STATUS_LABELS } from '../constants/enums'
 import { EMPTY_HINTS } from '../constants/messages'
-import { money, months, shortTime } from '../utils/format'
+import { money, shortTime } from '../utils/format'
 import { saveBlob } from '../utils/download'
 import AppShell from '../components/common/AppShell.vue'
 import PageHeader from '../components/common/PageHeader.vue'
@@ -104,11 +104,14 @@ onMounted(loadAll)
           </span>
           <span class="c-title">{{ plan.title }}</span>
           <span class="mono c-facts">
-            {{ plan.item_count }} 张 · 净年省 ¥{{ money(plan.net_save_year) }} · 回收期
-            {{ months(plan.avg_payback) }}
+            排期 {{ plan.scheduled_count }}/{{ plan.item_count }} 张 · {{ plan.batch_count }} 批 · 当年净省
+            ¥{{ money(plan.current_year_net_save) }}
           </span>
           <span class="mono c-risk">
-            阻断 {{ plan.risk_block_count }} · 需确认 {{ plan.risk_warn_count }} · 阈值 {{ plan.threshold }}
+            阻断 {{ plan.risk_block_count }} · 排不下 {{ plan.unscheduled_count }} · 月容量
+            {{ plan.monthly_capacity_gb.toLocaleString('zh-CN') }} GB · {{ plan.start_year }}-{{
+              String(plan.start_month).padStart(2, '0')
+            }} 开工
           </span>
         </button>
         <EmptyState

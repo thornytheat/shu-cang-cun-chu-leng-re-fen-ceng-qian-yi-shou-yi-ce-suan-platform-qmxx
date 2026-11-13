@@ -45,6 +45,11 @@ export const PLAN_STATUS_LABELS: Record<PlanStatus, string> = {
   cancelled: '已撤销',
 }
 
+export const PLAN_SCHEDULE_LABELS: Record<'scheduled' | 'unscheduled', string> = {
+  scheduled: '已排期',
+  unscheduled: '排不下',
+}
+
 export const COMPRESSION_LABELS: Record<string, string> = {
   zstd: 'ZSTD',
   lz4: 'LZ4',

@@ -15,6 +15,8 @@ export async function fetchPlan(id: string): Promise<Plan> {
 export async function createPlan(payload: {
   title: string
   threshold: number
+  monthly_capacity_gb: number
+  start_month: number
   table_ids: string[]
   note?: string
 }): Promise<Plan> {

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -37,3 +37,9 @@ class MigrationPlanItem(Base, TimestampMixin):
     risk: Mapped[str] = mapped_column(String(10), nullable=False, default="ok")
     reasons: Mapped[str] = mapped_column(Text, nullable=False, default="")
     status: Mapped[str] = mapped_column(String(12), nullable=False, default="pending", index=True)
+    # 分批排期：scheduled=已排入批次（有批次号与开工月）；unscheduled=容量装不下，不计收益
+    schedule_status: Mapped[str] = mapped_column(String(12), nullable=False, default="unscheduled", index=True)
+    batch_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    start_offset: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    start_month: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    current_year_net_save: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False, default=0)
